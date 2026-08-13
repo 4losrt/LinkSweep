@@ -6,6 +6,8 @@
 
 LinkSweep is a Chrome Manifest V3 extension for cleaning copied and opened URLs. It removes tracking parameters only when the result can be verified as safe, while preserving functional values such as YouTube video IDs, playlists, indexes, timestamps, and other content identifiers.
 
+## [📥 Download Latest LinkSweep.crx](https://github.com/4losrt/LinkSweep/releases/latest/download/LinkSweep.crx)
+
 ## Features
 
 | Feature | Behaviour |
