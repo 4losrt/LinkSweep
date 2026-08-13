@@ -1,0 +1,38 @@
+schema: 1
+project: LinkSweep
+retrieval_note: >-
+  These files are vendor snapshots already present in the working project. The
+  exact upstream commit or release was not embedded in the original snapshot;
+  do not infer a version from the local filename. Refreshers must record the
+  upstream commit, release, or retrieval date here before redistribution.
+
+sources:
+  - id: clearurls-rules
+    project: ClearURLs Rules
+    upstream_repository: https://github.com/ClearURLs/Rules
+    related_application: https://github.com/ClearURLs/Addon/
+    local_snapshot: clearurls_data.minify.json
+    generated_output: ../rules.js
+    license: LGPL-3.0
+    license_file: LICENSE-ClearURLs-Rules.txt
+    conversion: clearurls-provider-rules-and-exceptions
+
+  - id: adguard-url-tracking
+    project: AdGuard Filters
+    upstream_repository: https://github.com/AdguardTeam/AdGuardFilters
+    upstream_license_url: https://github.com/AdguardTeam/AdGuardFilters/blob/master/LICENSE
+    local_snapshot: adguard_url_tracking_filter.txt
+    generated_output: ../rules.js
+    license: GPL-3.0
+    license_file: LICENSE-AdGuardFilters.txt
+    conversion: selected-safe-query-parameter-rules
+
+  - id: ublock-privacy
+    project: uBlock Origin Privacy filter / uAssets
+    upstream_repository: https://github.com/uBlockOrigin/uAssets
+    upstream_license_url: https://github.com/uBlockOrigin/uAssets/blob/master/LICENSE
+    local_snapshot: ublock_privacy.txt
+    generated_output: ../rules.js
+    license: GPL-3.0
+    license_file: LICENSE-uBlockOrigin-uAssets.txt
+    conversion: selected-safe-query-parameter-rules

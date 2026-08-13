@@ -1,0 +1,26 @@
+{
+  "clearurls_providers": 206,
+  "merged_global_literals": 341,
+  "merged_global_patterns": 4,
+  "merged_site_rules": 755,
+  "adguard_global_literals": 312,
+  "ublock_global_literals": 131,
+  "adguard": {
+    "total_lines": 3879,
+    "removeparam_lines": 2543,
+    "accepted_global_literals": 314,
+    "accepted_global_patterns": 4,
+    "accepted_site_literals": 1715,
+    "accepted_site_patterns": 28,
+    "skipped_unsupported": 626
+  },
+  "ublock": {
+    "total_lines": 3268,
+    "removeparam_lines": 192,
+    "accepted_global_literals": 134,
+    "accepted_global_patterns": 0,
+    "accepted_site_literals": 23,
+    "accepted_site_patterns": 1,
+    "skipped_unsupported": 35
+  }
+}

@@ -1,0 +1,108 @@
+<!doctype html>
+<html lang="zh-Hant">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>LinkSweep</title>
+  <link rel="stylesheet" href="popup.css">
+</head>
+<body>
+  <main class="app-shell">
+    <header class="brand-header">
+      <img class="brand-icon" src="img/icon_128.png" alt="">
+      <div>
+        <p class="eyebrow">LINKSWEEP</p>
+        <h1>LinkSweep</h1>
+        <p class="tagline">清理連結，保留功能。</p>
+      </div>
+    </header>
+
+    <section class="master-card" id="masterCard">
+      <div class="master-copy">
+        <p class="card-label">自動清理</p>
+        <h2 id="masterTitle">自動清理已開啟</h2>
+        <p id="masterDescription">複製與開啟連結時，只在安全確認後移除追蹤碼。</p>
+      </div>
+      <label class="toggle toggle-large" aria-label="切換自動清理">
+        <input id="enabled" type="checkbox">
+        <span class="toggle-track"><span class="toggle-knob"></span></span>
+      </label>
+    </section>
+
+    <section class="settings-card">
+      <div class="setting-row">
+        <div class="setting-copy">
+          <h2>被動剪貼簿清理</h2>
+          <p>貼上前自動檢查剪貼簿中的單一 URL。</p>
+        </div>
+        <label class="toggle" aria-label="切換被動剪貼簿清理">
+          <input id="pasteClean" type="checkbox">
+          <span class="toggle-track"><span class="toggle-knob"></span></span>
+        </label>
+      </div>
+      <p id="clipboardStatus" class="inline-status"></p>
+    </section>
+
+    <section class="last-card" aria-labelledby="lastHeading">
+      <div class="section-heading">
+        <div>
+          <p class="card-label">活動紀錄</p>
+          <h2 id="lastHeading">最後一次清理</h2>
+        </div>
+        <span id="lastSource" class="source-pill">尚無紀錄</span>
+      </div>
+      <p id="lastEmpty" class="empty-state">尚未清理任何連結。你的原始 URL 會在無法安全確認時保持不變。</p>
+      <div id="lastDetail" class="last-detail" hidden>
+        <div class="url-block">
+          <span>原始連結</span>
+          <code id="lastBefore"></code>
+        </div>
+        <div class="url-divider" aria-hidden="true">↓</div>
+        <div class="url-block clean-url-block">
+          <span>清理後</span>
+          <code id="lastAfter"></code>
+        </div>
+        <div class="removed-row">
+          <span>移除的參數</span>
+          <div id="removedList" class="chips"></div>
+        </div>
+        <p id="lastTime" class="timestamp"></p>
+      </div>
+    </section>
+
+    <section class="manual-card" aria-labelledby="manualHeading">
+      <div class="section-heading manual-heading">
+        <div>
+          <p class="card-label">備用工具</p>
+          <h2 id="manualHeading">手動清理 URL</h2>
+        </div>
+        <span class="source-pill">按下才執行</span>
+      </div>
+      <textarea id="input" rows="3" placeholder="貼上一個 http(s) URL"></textarea>
+      <button id="clean" class="primary-button" type="button">清理 URL</button>
+      <textarea id="output" rows="3" readonly placeholder="清理後的 URL 會顯示在這裡"></textarea>
+      <button id="copy" class="secondary-button" type="button" disabled>複製清理後的 URL</button>
+      <p id="manualStatus" class="inline-status" role="status"></p>
+    </section>
+
+    <details class="advanced-card">
+      <summary>進階安全設定</summary>
+      <label class="check-row">
+        <input id="referralMarketing" type="checkbox">
+        <span>
+          <strong>移除聯盟行銷追蹤參數</strong>
+          <small>預設關閉；開啟後會採用更積極的規則。</small>
+        </span>
+      </label>
+    </details>
+
+    <footer>
+      <span>ClearURLs + AdGuard + uBlock 規則</span>
+      <span>無法確認時保留原始連結</span>
+    </footer>
+  </main>
+  <script src="rules.js"></script>
+  <script src="cleaner.js"></script>
+  <script src="popup.js"></script>
+</body>
+</html>
