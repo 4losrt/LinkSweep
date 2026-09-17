@@ -3,7 +3,7 @@
 
     const DEFAULT_SETTINGS = {
         enabled: true,
-        pasteClean: true,
+        pasteClean: false,
         referralMarketing: false,
         copiedCount: 0,
         pasteCleanedCount: 0,
@@ -35,6 +35,11 @@
     const lastTime = document.querySelector("#lastTime");
 
     let settings = {...DEFAULT_SETTINGS};
+    let settingsReady = false;
+    let saving = false;
+    let settingsRevision = 0;
+    let manualGeneration = 0;
+    let verified = null;
 
     function setStatus(element, message, error = false) {
         element.textContent = message;
@@ -44,6 +49,8 @@
     function renderMaster() {
         const on = Boolean(settings.enabled);
         enabled.checked = on;
+        enabled.disabled = !settingsReady || saving;
+        referralMarketing.disabled = !settingsReady || saving;
         masterCard.classList.toggle("is-off", !on);
         masterTitle.textContent = on ? "自動清理已開啟" : "自動清理已關閉";
         masterDescription.textContent = on
@@ -51,13 +58,13 @@
             : "複製、點擊與被動剪貼簿清理都已暫停。手動清理仍可使用。";
 
         pasteClean.checked = Boolean(settings.pasteClean);
-        pasteClean.disabled = !on;
+        pasteClean.disabled = !settingsReady || saving || !on;
         setStatus(
             clipboardStatus,
             !on
                 ? "總開關關閉中；啟用後才會監控剪貼簿。"
                 : settings.pasteClean
-                    ? "監控已啟用：只處理單一 http(s) URL。"
+                    ? "監控已啟用：僅處理單一純文字 URL；最後檢查後仍有覆寫競態風險。"
                     : "監控已停用：剪貼簿不會被讀取或改寫。"
         );
         referralMarketing.checked = Boolean(settings.referralMarketing);
@@ -128,14 +135,27 @@
     }
 
     async function load() {
-        settings = {...DEFAULT_SETTINGS, ...(await chrome.storage.local.get(DEFAULT_SETTINGS))};
+        const revision = settingsRevision;
+        const current = await chrome.runtime.sendMessage({type: "getSettings"});
+        if (!current || current.error) throw new Error("Settings unavailable");
+        if (revision !== settingsRevision) return load();
+        settings = {...DEFAULT_SETTINGS, ...current};
+        settingsReady = true;
         render();
     }
 
     async function setSetting(key, value) {
-        settings = {...settings, [key]: value};
+        if (!settingsReady || saving) return;
+        saving = true;
         render();
-        await chrome.storage.local.set({[key]: value});
+        try {
+            const current = await chrome.runtime.sendMessage({type: "setSetting", key, value});
+            if (!current || current.error) throw new Error("Setting not saved");
+            await load();
+        } finally {
+            saving = false;
+            render();
+        }
     }
 
     enabled.addEventListener("change", () => {
@@ -150,10 +170,20 @@
         setSetting("referralMarketing", referralMarketing.checked).catch(() => {});
     });
 
-    cleanButton.addEventListener("click", async () => {
-        const value = input.value.trim();
+    function invalidateManual() {
+        manualGeneration += 1;
+        verified = null;
         output.value = "";
         copyButton.disabled = true;
+    }
+
+    input.addEventListener("input", invalidateManual);
+
+    cleanButton.addEventListener("click", async () => {
+        invalidateManual();
+        const version = manualGeneration;
+        const original = input.value;
+        const value = original.trim();
         if (!CleanURLs.isURL(value)) {
             setStatus(manualStatus, "請輸入一個有效的 http(s) URL。", true);
             return;
@@ -169,13 +199,15 @@
                 referralMarketing: Boolean(settings.referralMarketing)
             });
         }
-        if (!result || !result.safe || !CleanURLs.isURL(result.output)) {
+        if (version !== manualGeneration || input.value !== original) return;
+        if (!result || result.input !== value || !result.safe || !CleanURLs.isURL(result.output)) {
             output.value = value;
             setStatus(manualStatus, "無法安全確認，已保留原始 URL。", true);
             return;
         }
 
         output.value = result.output;
+        verified = {input: original, output: result.output, version};
         copyButton.disabled = false;
         if (result.resolved && result.changed) {
             setStatus(manualStatus, `Threads 連結已還原並清理：${(result.removed || []).join(", ") || "特殊分享參數"}`);
@@ -189,21 +221,31 @@
     });
 
     copyButton.addEventListener("click", async () => {
-        if (!output.value) return;
+        const current = verified;
+        if (!current || current.version !== manualGeneration || current.input !== input.value
+            || current.output !== output.value || !CleanURLs.isURL(current.output)) {
+            invalidateManual();
+            setStatus(manualStatus, "請先重新清理並確認 URL，再複製。", true);
+            return;
+        }
         try {
-            await navigator.clipboard.writeText(output.value);
-            setStatus(manualStatus, "已複製清理後的 URL。被動監控不會重複改寫它。");
+            await navigator.clipboard.writeText(current.output);
+            if (current.version !== manualGeneration) return;
+            setStatus(manualStatus, "已複製已確認的 URL；不保證所有追蹤參數都已移除。");
         } catch (error) {
             setStatus(manualStatus, "瀏覽器未允許寫入剪貼簿。", true);
         }
     });
 
-    chrome.storage.onChanged.addListener(changes => {
+    chrome.storage.onChanged.addListener((changes, area) => {
+        if (area !== "local") return;
+        settingsRevision += 1;
         for (const [key, change] of Object.entries(changes)) {
-            settings[key] = change.newValue;
+            settings[key] = change.newValue ?? DEFAULT_SETTINGS[key];
         }
         render();
     });
 
+    render();
     load().catch(() => setStatus(clipboardStatus, "無法載入 LinkSweep 設定。", true));
 })();
