@@ -2,7 +2,7 @@
     "use strict";
 
     const FUNCTIONAL_PARAMETERS = new Set([
-        "q", "query", "search", "keyword", "keywords", "page", "p", "id", "ids",
+        "q", "s", "query", "search", "keyword", "keywords", "page", "p", "id", "ids",
         "item", "itemid", "product", "productid", "sku", "asin", "v", "video", "list",
         "index", "sort", "order", "filter", "category", "cat", "tag", "tags", "lang",
         "language", "locale", "country", "region", "ref", "redirect", "redirect_uri",
@@ -41,41 +41,28 @@
         /^wickedid$/i,
         /^tracking_source$/i,
         /^itm_(?:campaign|medium|source)$/i,
-        /^cmpid$/i,
-        /^Echobox$/i,
-        /^spm$/i,
-        /^referrer$/i,
-        /^ref_?id$/i,
-        /^ref_?source$/i,
-        /^campaign_id$/i,
-        /^campaignid$/i,
-        /^click(?:id|_id|info)$/i,
-        /^trk(?:ing)?(?:id|_id|parms)?$/i,
-        /^affiliate(?:_id|id)?$/i,
-        /^aff_(?:id|source|track)$/i,
-        /^source_(?:id|name)$/i,
-        /^tracking(?:_id|id)?$/i
+        /^Echobox$/i
     ];
 
-    const CACHE = new Map();
-    let rulesData = null;
+    const REGEX_CACHE = new Map();
+    const AUTH_PARAMETER = /^(?:.*(?:token|signature|session|nonce|csrf|xsrf|credential|password).*|code|state|auth|authorization|key|api[_-]?key|sig|hmac|jwt|samlrequest|samlresponse|relaystate|policy|expires|expiry|key-pair-id|x-amz-.*|x-goog-.*|oauth[_-].*|access[_-]?key|awsaccesskeyid)$/i;
 
     function safeRegExp(pattern, flags = "i") {
+        const key = `${flags}:${pattern}`;
+        if (REGEX_CACHE.has(key)) return REGEX_CACHE.get(key);
+        let expression = null;
         try {
-            return new RegExp(pattern, flags);
+            expression = new RegExp(pattern, flags);
         } catch (error) {
-            return null;
+            expression = null;
         }
+        if (REGEX_CACHE.size >= 256) REGEX_CACHE.delete(REGEX_CACHE.keys().next().value);
+        REGEX_CACHE.set(key, expression);
+        return expression;
     }
 
     function getRulesData() {
-        if (rulesData) return rulesData;
-        try {
-            if (typeof CLEAN_URLS_RULES !== "undefined") rulesData = CLEAN_URLS_RULES;
-        } catch (error) {
-            rulesData = null;
-        }
-        return rulesData;
+        return typeof CLEAN_URLS_RULES !== "undefined" ? CLEAN_URLS_RULES : null;
     }
 
     function isURL(value) {
@@ -102,14 +89,15 @@
     }
 
     function providerFor(url, provider) {
-        const expression = safeRegExp(provider.urlPattern || ".*", "i");
+        if (!provider.urlPattern) return false;
+        const expression = safeRegExp(provider.urlPattern, "i");
         return Boolean(expression && expression.test(url));
     }
 
     function providerException(provider, url) {
         return (provider.exceptions || []).some(pattern => {
             const expression = safeRegExp(pattern, "i");
-            return Boolean(expression && expression.test(url));
+            return !expression || expression.test(url);
         });
     }
 
@@ -126,52 +114,68 @@
         return normalizedCandidate === normalizedHost || normalizedCandidate.endsWith(`.${normalizedHost}`);
     }
 
+    function filterParameterMatch(rule, name, value) {
+        if ((rule.literals || []).includes(name)) return true;
+        return (rule.patterns || []).some(pattern => {
+            const expression = safeRegExp(pattern, "");
+            return Boolean(expression && expression.test(`${name}=${value}`));
+        });
+    }
+
+    function initiatorMatches(scope, sourceURL) {
+        if (!scope || scope.unsupported) return true;
+        const domains = [scope.include, scope.exclude];
+        if (domains.some(list => !Array.isArray(list) || list.some(host => typeof host !== "string"
+            || !/^[a-z0-9](?:[a-z0-9-]*[a-z0-9])?(?:\.[a-z0-9](?:[a-z0-9-]*[a-z0-9])?)*$/i.test(host)))) return true;
+        const source = normalizeURL(sourceURL);
+        if (!source || /[\u0000-\u0020\u007f\\]/.test(sourceURL)) return true;
+        const host = source.hostname.replace(/\.$/, "");
+        if (scope.exclude.some(domain => hostMatches(domain, host))) return false;
+        return !scope.include.length || scope.include.some(domain => hostMatches(domain, host));
+    }
+
+    function filterException(url, name, value, data) {
+        return (data?.adguard?.exceptions || []).some(rule => {
+            const expression = safeRegExp(rule.urlPattern || ".*");
+            return (!expression || expression.test(url.href))
+                && initiatorMatches(rule.initiator, data.sourceURL)
+                && (rule.all || (rule.literals || []).some(item => item.toLowerCase() === name.toLowerCase())
+                    || (rule.patterns || []).some(pattern => {
+                        const parameter = safeRegExp(pattern, "i");
+                        return !parameter || parameter.test(`${name}=${value}`);
+                    }));
+        });
+    }
+
     function adguardParameterMatch(url, name, value, data) {
         const adguard = data && data.adguard;
         if (!adguard) return false;
-        const pair = `${name}=${value ?? ""}`;
-        const literalMatch = values => (values || []).some(item => String(item).toLowerCase() === String(name).toLowerCase());
-        const patternMatch = values => (values || []).some(pattern => {
-            const expression = safeRegExp(pattern, "i");
-            return Boolean(expression && (expression.test(name) || expression.test(pair)));
-        });
-        if (literalMatch(adguard.globalLiterals) || patternMatch(adguard.globalPatterns)) return true;
+        if (filterException(url, name, value, data)) return false;
+        if (matchesAny(GLOBAL_TRACKING_PATTERNS, name) && filterParameterMatch({
+            literals: adguard.globalLiterals, patterns: adguard.globalPatterns
+        }, name, value)) return true;
         for (const site of adguard.siteRules || []) {
             if (!hostMatches(site.host, url.hostname || "")) continue;
-            if (literalMatch(site.literals) || patternMatch(site.patterns)) return true;
+            if (filterParameterMatch(site, name, value)) return true;
         }
         return false;
     }
 
     function shouldRemoveParameter(url, name, value, data) {
-        const lowerName = name.toLowerCase();
-        if (isFunctionalParameter(lowerName)) return false;
-
+        if (AUTH_PARAMETER.test(name) || filterException(url, name, value, data)) return false;
+        const functional = isFunctionalParameter(name);
+        const providers = Object.entries(data.providers || {});
+        const applicable = providers.filter(([key, provider]) => key !== "globalRules" && providerFor(url, provider));
+        if (applicable.some(([, provider]) => providerException(provider, url))) return false;
+        const globalProvider = data.providers?.globalRules;
+        if (globalProvider && providerException(globalProvider, url)) return false;
+        const referral = applicable.some(([, provider]) => providerParameterMatch({rules: provider.referralMarketing}, name));
+        if (referral) return Boolean(data.referralMarketing && (!functional || name.toLowerCase() === "tag"));
+        if (functional) return false;
         if (adguardParameterMatch(url, name, value, data)) return true;
-
-        const globalProvider = data && data.providers && data.providers.globalRules;
-        if (globalProvider && !providerException(globalProvider, url)) {
-            const patterns = (globalProvider.rules || [])
-                .map(pattern => safeRegExp(pattern.replace(/^\(\?:%3F\)\?/, ""), "i"))
-                .filter(Boolean);
-            if (patterns.some(pattern => pattern.test(name)) || matchesAny(GLOBAL_TRACKING_PATTERNS, name)) {
-                return true;
-            }
-        } else if (matchesAny(GLOBAL_TRACKING_PATTERNS, name)) {
-            return false;
-        }
-
-        for (const [providerName, provider] of Object.entries(data?.providers || {})) {
-            if (providerName === "globalRules") continue;
-            if (!providerFor(url, provider) || providerException(provider, url)) continue;
-            if (providerParameterMatch(provider, name)) return true;
-            if (data.referralMarketing && (provider.referralMarketing || []).some(pattern => {
-                const expression = safeRegExp(`^(?:${pattern})$`, "i");
-                return Boolean(expression && expression.test(name));
-            })) return true;
-        }
-
-        return false;
+        if (globalProvider && matchesAny(GLOBAL_TRACKING_PATTERNS, name)
+            && providerParameterMatch(globalProvider, name)) return true;
+        return applicable.some(([, provider]) => providerParameterMatch(provider, name));
     }
 
     function cleanURL(input, data = getRulesData()) {
@@ -180,35 +184,38 @@
             return {input, output: input, changed: false, safe: false, removed: []};
         }
 
-        const source = url.toString();
-        const cached = CACHE.get(source);
-        if (cached) return {...cached, removed: [...cached.removed]};
-
-        const removed = [];
-        for (const name of [...url.searchParams.keys()]) {
-            const value = url.searchParams.get(name) || "";
-            if (shouldRemoveParameter(url, name, value, data)) {
-                url.searchParams.delete(name);
-                removed.push(name);
+        const unchanged = {input, output: input, changed: false, safe: true, removed: []};
+        if (/[\u0000-\u0020\u007f\\]/.test(input) || input !== input.trim()) return {...unchanged, safe: false};
+        const hashIndex = input.indexOf("#");
+        const end = hashIndex < 0 ? input.length : hashIndex;
+        const queryIndex = input.indexOf("?");
+        if (queryIndex < 0 || queryIndex > end) return unchanged;
+        const decode = value => decodeURIComponent(value.replace(/\+/g, " "));
+        let fields;
+        try {
+            fields = input.slice(queryIndex + 1, end).split("&").map(raw => {
+                const separator = raw.indexOf("=");
+                return {raw, name: decode(separator < 0 ? raw : raw.slice(0, separator)),
+                    value: decode(separator < 0 ? "" : raw.slice(separator + 1))};
+            });
+            const fragment = decode(input.slice(end));
+            if (fields.some(field => AUTH_PARAMETER.test(field.name))
+                || /(?:^|[#?&])(?:[^=&#]*(?:token|signature|auth)|code|state)=/i.test(fragment)) {
+                return {...unchanged, safe: false};
             }
+        } catch (error) {
+            return {...unchanged, safe: false};
         }
-
-        if (!removed.length) {
-            const result = {input, output: input, changed: false, safe: true, removed: []};
-            CACHE.set(source, result);
-            return result;
-        }
-
-        const output = url.toString();
-        const result = {
-            input,
-            output,
-            changed: output !== input,
-            safe: output.startsWith(`${url.protocol}//${url.host}${url.pathname}`),
-            removed
-        };
-        if (result.safe) CACHE.set(source, result);
-        return result;
+        const removed = [];
+        const kept = fields.filter(field => {
+            if (!shouldRemoveParameter(url, field.name, field.value, data)) return true;
+            removed.push(field.name);
+            return false;
+        });
+        if (!removed.length) return unchanged;
+        const output = input.slice(0, queryIndex)
+            + (kept.length ? `?${kept.map(field => field.raw).join("&")}` : "") + input.slice(end);
+        return {input, output, changed: true, safe: true, removed};
     }
 
     function extractSingleURL(text) {
@@ -232,6 +239,6 @@
         extractLinkURL,
         isURL,
         getRulesData,
-        clearCache() { CACHE.clear(); }
+        clearCache() { REGEX_CACHE.clear(); }
     };
 })();

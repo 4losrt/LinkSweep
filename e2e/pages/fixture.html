@@ -1,0 +1,65 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>LinkSweep fixture</title>
+<style>
+  body { font-family: system-ui, sans-serif; margin: 2rem; }
+  .url { color: #1565c0; text-decoration: underline; cursor: pointer; user-select: all; }
+  button { margin-top: 1rem; padding: .5rem 1rem; }
+  #status { margin-top: .75rem; color: #444; white-space: pre-wrap; }
+</style>
+</head>
+<body>
+  <h1>LinkSweep test fixture</h1>
+  <p id="urlPara">Tracked link:
+    <a id="trackedLink" class="url" href="https://example.com/?fbclid=abc123&utm_source=news">https://example.com/landing</a>
+  </p>
+  <p id="plainPara">Plain URL to select:
+    <span id="plainUrl" class="url">https://example.com/?fbclid=abc123&utm_source=news</span>
+  </p>
+  <button id="copyTracked">Copy tracked URL (writeText)</button>
+  <button id="copyRich">Copy rich item</button>
+  <button id="copyNonUrl">Copy non-URL text</button>
+  <button id="copyShare">Copy Threads share</button>
+  <p id="status">ready</p>
+  <script>
+    const status = document.getElementById("status");
+    document.getElementById("copyTracked").addEventListener("click", async () => {
+      try {
+        await navigator.clipboard.writeText("https://example.com/?fbclid=abc123&utm_source=news");
+        status.textContent = "writeText committed";
+      } catch (error) {
+        status.textContent = "writeText failed: " + error.message;
+      }
+    });
+    document.getElementById("copyRich").addEventListener("click", async () => {
+      try {
+        const html = new Blob(["<b>hello</b>"], {type: "text/html"});
+        const text = new Blob(["https://example.com/?fbclid=abc123"], {type: "text/plain"});
+        await navigator.clipboard.write([new ClipboardItem({"text/plain": text, "text/html": html})]);
+        status.textContent = "rich write committed";
+      } catch (error) {
+        status.textContent = "rich write failed: " + error.message;
+      }
+    });
+    document.getElementById("copyNonUrl").addEventListener("click", async () => {
+      try {
+        await navigator.clipboard.writeText("just a plain sentence, no links");
+        status.textContent = "non-url committed";
+      } catch (error) {
+        status.textContent = "non-url failed: " + error.message;
+      }
+    });
+    document.getElementById("copyShare").addEventListener("click", async () => {
+      try {
+        await navigator.clipboard.writeText("https://www.threads.com/share/Test123/");
+        status.textContent = "share committed";
+      } catch (error) {
+        status.textContent = "share failed: " + error.message;
+      }
+    });
+    document.addEventListener("copy", () => { status.textContent = "copy event fired"; });
+  </script>
+</body>
+</html>

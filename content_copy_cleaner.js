@@ -1,240 +1,223 @@
 (() => {
     "use strict";
 
-    const DEFAULT_SETTINGS = {
-        enabled: true,
-        pasteClean: true,
-        referralMarketing: false
-    };
-    let settings = {...DEFAULT_SETTINGS};
+    const DEFAULT_SETTINGS = {enabled: true, pasteClean: false, referralMarketing: false};
+    let settings = {...DEFAULT_SETTINGS, enabled: false};
+    let revision = 0;
     const specialCache = new Map();
-    const specialPending = new Set();
+    const specialPending = new Map();
+    let clipboardRequest = null;
+    const clipboardResolutions = new WeakSet();
+    let lastClipboardRequestId = 0;
+    const MAX_CACHE = 100;
+    const SUCCESS_TTL = 300000;
+    const FAILURE_TTL = 15000;
 
     function broadcastNavigationSettings() {
-        window.postMessage({
-            source: "clean-urls-copy",
-            type: "settings",
-            enabled: Boolean(settings.enabled),
-            pasteClean: Boolean(settings.pasteClean),
-            referralMarketing: Boolean(settings.referralMarketing)
-        }, "*");
+        window.postMessage({source: "clean-urls-copy", type: "settings",
+            enabled: Boolean(settings.enabled), pasteClean: Boolean(settings.pasteClean),
+            referralMarketing: Boolean(settings.referralMarketing)}, "*");
     }
 
     function loadSettings() {
-        return chrome.storage.local.get(DEFAULT_SETTINGS)
-            .then(result => {
-                settings = {...DEFAULT_SETTINGS, ...result};
-                broadcastNavigationSettings();
-                return settings;
-            })
-            .catch(() => {
-                broadcastNavigationSettings();
-                return settings;
-            });
-    }
-
-    function selectedText() {
-        const selection = window.getSelection();
-        return selection ? selection.toString().trim() : "";
-    }
-
-    function closestAnchor(node) {
-        const element = node && node.nodeType === Node.TEXT_NODE ? node.parentElement : node;
-        return element && element.closest ? element.closest("a[href], area[href]") : null;
-    }
-
-    function extractCandidate(event) {
-        const selected = selectedText();
-        const selectedURL = CleanURLs.extractSingleURL(selected);
-        if (selectedURL) {
-            return {url: selectedURL, source: "selection"};
-        }
-
-        const selection = window.getSelection();
-        const anchor = closestAnchor(selection && selection.anchorNode)
-            || closestAnchor(event.target)
-            || (document.activeElement && closestAnchor(document.activeElement));
-        if (!anchor || selected) return null;
-
-        const href = CleanURLs.extractLinkURL(anchor);
-        if (!href) return null;
-        return {url: href, source: "anchor"};
-    }
-
-    function isWritableCopyEvent(event) {
-        return Boolean(event && event.cancelable && event.clipboardData
-            && typeof event.clipboardData.setData === "function");
-    }
-
-    function cacheSpecialResult(result) {
-        if (!result || !result.input) return;
-        specialCache.set(result.input, result);
-        window.postMessage({
-            source: "clean-urls-copy",
-            type: "resolved-cache",
-            input: result.input,
-            output: result.output,
-            safe: Boolean(result.safe),
-            resolved: Boolean(result.resolved),
-            removed: Array.isArray(result.removed) ? result.removed : []
-        }, "*");
-    }
-
-    function prefetchSpecialURL(value) {
-        if (!window.CleanURLsSpecial || !CleanURLsSpecial.isThreadsShareURL(value)) return;
-        if (specialCache.has(value) || specialPending.has(value)) return;
-        specialPending.add(value);
-        chrome.runtime.sendMessage({type: "resolveSpecialURL", url: value})
-            .then(result => {
-                specialPending.delete(value);
-                if (result) cacheSpecialResult(result);
-            })
-            .catch(() => specialPending.delete(value));
-    }
-
-    function notifyBackground(result, source) {
-        chrome.runtime.sendMessage({
-            type: "copyCleaned",
-            before: result.input,
-            after: result.output,
-            removed: result.removed,
-            source
+        const version = revision;
+        return chrome.storage.local.get(DEFAULT_SETTINGS).then(result => {
+            if (version !== revision) return;
+            settings = {...DEFAULT_SETTINGS, ...result};
+            broadcastNavigationSettings();
         }).catch(() => {});
     }
 
-    function isTrustedCommittedPair(input, output, resolved = false) {
-        if (!CleanURLs.isURL(input) || !CleanURLs.isURL(output)) return false;
-        if (window.CleanURLsSpecial && CleanURLsSpecial.isThreadsShareURL(input)) {
-            return Boolean(resolved && CleanURLsSpecial.isThreadsPostURL(output));
-        }
-        const local = CleanURLs.cleanURL(input, {
-            ...CLEAN_URLS_RULES,
-            enabled: true,
-            referralMarketing: Boolean(settings.referralMarketing)
-        });
-        return Boolean(local.safe && local.changed && local.output === output);
-    }
-
-    function sendClipboardResponse(requestId, input, result) {
-        const safe = Boolean(result && result.safe && CleanURLs.isURL(result.output));
-        const output = safe ? result.output : input;
-        window.postMessage({
-            source: "clean-urls-copy",
-            type: "clipboard-response",
-            requestId,
-            input,
-            output,
-            safe,
-            changed: safe && output !== input,
-            resolved: Boolean(result && result.resolved),
-            removed: Array.isArray(result && result.removed) ? result.removed : []
-        }, "*");
-    }
-
-    async function handleClipboardRequest(event) {
-        const message = event && event.data;
-        if (event.source !== window || !message
-            || message.source !== "clean-urls-copy-navigation"
-            || message.type !== "clipboard-request") return;
-        const requestId = typeof message.requestId === "string" ? message.requestId : "";
-        const input = typeof message.value === "string" ? message.value : "";
-        if (!requestId || !CleanURLs.isURL(input) || !settings.enabled || !settings.pasteClean) {
-            sendClipboardResponse(requestId, input, {
-                input,
-                output: input,
-                safe: false,
-                changed: false,
-                removed: []
-            });
-            return;
-        }
+    function isPureURL(value) {
+        if (typeof value !== "string" || !/^https?:\/\//i.test(value)
+            || /[\u0000-\u0020\u007f\\]/.test(value)) return false;
         try {
-            const result = await chrome.runtime.sendMessage({type: "cleanClipboardURL", url: input});
-            sendClipboardResponse(requestId, input, result);
+            const url = new URL(value);
+            return !url.username && !url.password;
         } catch (error) {
-            sendClipboardResponse(requestId, input, {
-                input,
-                output: input,
-                safe: false,
-                changed: false,
-                removed: []
-            });
+            return false;
         }
+    }
+
+    function closestAnchor(node) {
+        const element = node?.nodeType === 3 ? node.parentElement : node;
+        return element?.closest?.("a[href], area[href]") || null;
+    }
+
+    function isEditable(node) {
+        const element = node?.nodeType === 3 ? node.parentElement : node;
+        return Boolean(element && (element.isContentEditable
+            || element.closest?.("input, textarea, select, [contenteditable]:not([contenteditable='false']), [role='textbox']")));
+    }
+
+    function selectedURL(event) {
+        if (isEditable(event?.target) || isEditable(document.activeElement)
+            || event?.composedPath?.().some(isEditable)) return null;
+        const selection = window.getSelection();
+        if (!selection || selection.rangeCount !== 1 || selection.isCollapsed) return null;
+        const range = selection.getRangeAt(0);
+        if (range.startContainer !== range.endContainer || range.startContainer?.nodeType !== 3
+            || isEditable(range.startContainer)) return null;
+        const parent = range.startContainer.parentElement;
+        if (!parent || parent.closest?.("a, b, strong, i, em, u, s, code, pre, [style], [class]")) return null;
+        const value = selection.toString();
+        return isPureURL(value) ? value : null;
+    }
+
+    function cached(value) {
+        const entry = specialCache.get(value);
+        if (!entry) return null;
+        if (entry.expires <= Date.now()) {
+            specialCache.delete(value);
+            return null;
+        }
+        return entry.result;
+    }
+
+    function remember(value, result) {
+        specialCache.delete(value);
+        if (specialCache.size >= MAX_CACHE) specialCache.delete(specialCache.keys().next().value);
+        specialCache.set(value, {result, expires: Date.now() + (result ? SUCCESS_TTL : FAILURE_TTL)});
+    }
+
+    function verifiedResult(value, result) {
+        if (!result || result.input !== value || result.safe !== true || result.resolved !== true) return null;
+        const canonical = CleanURLsSpecial.validateThreadsResolvedURL(result.resolvedURL);
+        if (!canonical || canonical !== result.output) return null;
+        return {input: value, output: canonical, safe: true, changed: canonical !== value, resolved: true, removed: []};
+    }
+
+    function prefetchSpecialURL(value) {
+        if (!settings.enabled || typeof value !== "string" || value.length > 8192
+            || !window.CleanURLsSpecial || !CleanURLsSpecial.isThreadsShareURL(value)) return;
+        const result = cached(value);
+        if (specialCache.has(value)) return Promise.resolve(result);
+        if (specialPending.has(value)) return specialPending.get(value).promise;
+        if (specialPending.size >= 16) return Promise.resolve(null);
+        const version = revision;
+        const entry = {};
+        const expired = new Promise(resolve => {
+            entry.cancel = () => resolve(null);
+            entry.timeout = setTimeout(entry.cancel, 6000);
+        });
+        entry.promise = Promise.race([Promise.resolve().then(() => version === revision && settings.enabled
+            ? chrome.runtime.sendMessage({type: "resolveSpecialURL", url: value}) : null), expired])
+            .then(result => verifiedResult(value, result)).catch(() => null).then(result => {
+                if (version !== revision || !settings.enabled) return null;
+                remember(value, result);
+                return result;
+            }).finally(() => {
+                clearTimeout(entry.timeout);
+                if (specialPending.get(value) === entry) specialPending.delete(value);
+            });
+        specialPending.set(value, entry);
+        return entry.promise;
+    }
+
+    function resolveClipboardRequest(message) {
+        const {requestId, input} = message;
+        if (!settings.enabled || !Number.isSafeInteger(requestId) || requestId <= lastClipboardRequestId
+            || !isPureURL(input) || input.length > 8192 || !window.CleanURLsSpecial
+            || !CleanURLsSpecial.isThreadsShareURL(input)) return;
+        lastClipboardRequestId = requestId;
+        const promise = Promise.resolve(prefetchSpecialURL(input));
+        clipboardRequest = {requestId, input, version: revision, promise};
+        if (clipboardResolutions.has(promise)) return;
+        clipboardResolutions.add(promise);
+        promise.then(result => {
+            const request = clipboardRequest;
+            if (!request || request.promise !== promise || request.version !== revision || !settings.enabled) return;
+            clipboardRequest = null;
+            window.postMessage({source: "clean-urls-copy", type: "clipboard-resolve-result",
+                requestId: request.requestId, input: request.input, result: result || null}, "*");
+        }).catch(() => {
+            if (clipboardRequest?.promise === promise) clipboardRequest = null;
+        });
+    }
+
+    function notifyBackground(result, source) {
+        try {
+            Promise.resolve(chrome.runtime.sendMessage({type: "copyCleaned", before: result.input,
+                after: result.output, removed: result.removed, source})).catch(() => {});
+        } catch (error) {}
+    }
+
+    function localResult(input) {
+        return CleanURLs.cleanURL(input, {...CLEAN_URLS_RULES, enabled: true,
+            sourceURL: window.location?.href, referralMarketing: Boolean(settings.referralMarketing)});
     }
 
     function handleCopy(event) {
-        if (event.defaultPrevented || !isWritableCopyEvent(event) || !settings.enabled) return;
-
-        const candidate = extractCandidate(event);
-        if (!candidate || !CleanURLs.isURL(candidate.url)) return;
-
-        const data = {
-            ...CLEAN_URLS_RULES,
-            enabled: true,
-            referralMarketing: Boolean(settings.referralMarketing)
-        };
-        const special = specialCache.get(candidate.url);
-        const result = special && special.safe
-            ? {
-                input: candidate.url,
-                output: special.output,
-                changed: special.output !== candidate.url,
-                safe: true,
-                removed: Array.isArray(special.removed) ? special.removed : []
-            }
-            : CleanURLs.cleanURL(candidate.url, data);
-        if (!result.changed || !result.safe || !CleanURLs.isURL(result.output)) return;
-
+        if (!settings.enabled || event.defaultPrevented || !event.cancelable
+            || !event.clipboardData || typeof event.clipboardData.setData !== "function") return;
         try {
-            const existingTypes = Array.from(event.clipboardData.types || []);
-            event.clipboardData.setData("text/plain", result.output);
-            if (candidate.source === "anchor" || existingTypes.includes("text/uri-list")) {
-                event.clipboardData.setData("text/uri-list", result.output);
+            if (Array.from(event.clipboardData.types || []).some(type => type !== "text/plain")) return;
+            const value = selectedURL(event);
+            if (!value) return;
+            let result;
+            if (window.CleanURLsSpecial && CleanURLsSpecial.isThreadsShareURL(value)) {
+                result = cached(value);
+                if (!result) {
+                    prefetchSpecialURL(value);
+                    return;
+                }
+            } else {
+                result = localResult(value);
             }
+            if (!result?.changed || !result.safe || !isPureURL(result.output)) return;
+            event.clipboardData.setData("text/plain", result.output);
             event.preventDefault();
-            notifyBackground(result, candidate.source);
-        } catch (error) {
-            // If any write fails, do not cancel the browser's original copy.
-        }
+            notifyBackground(result, "selection");
+        } catch (error) {}
     }
 
     window.addEventListener("message", event => {
-        if (event.source === window && event.data
-            && event.data.source === "clean-urls-copy-navigation"
-            && event.data.type === "clipboard-committed") {
-            const before = typeof event.data.before === "string" ? event.data.before : "";
-            const after = typeof event.data.after === "string" ? event.data.after : "";
-            const resolved = Boolean(event.data.resolved);
-            if (isTrustedCommittedPair(before, after, resolved)) {
-                chrome.runtime.sendMessage({
-                    type: "clipboardCleaned",
-                    before,
-                    after,
-                    removed: Array.isArray(event.data.removed) ? event.data.removed : [],
-                    resolved
-                }).catch(() => {});
-            }
+        if (event.source !== window || !event.data || event.data.source !== "clean-urls-copy-navigation") return;
+        if (event.data.type === "clipboard-resolve-request") {
+            resolveClipboardRequest(event.data);
+            return;
         }
-        handleClipboardRequest(event).catch(() => {});
+        if (event.data.type === "prefetch-special") {
+            prefetchSpecialURL(event.data.value);
+            return;
+        }
+        if (!settings.enabled || event.data.type !== "clipboard-committed") return;
+        try {
+            const {before, after} = event.data;
+            if (!isPureURL(before) || !isPureURL(after)
+                || (window.CleanURLsSpecial && CleanURLsSpecial.isThreadsShareURL(before))) return;
+            const result = localResult(before);
+            if (!result.safe || !result.changed || result.output !== after) return;
+            Promise.resolve(chrome.runtime.sendMessage({type: "clipboardCleaned", before, after,
+                removed: result.removed, resolved: false})).catch(() => {});
+        } catch (error) {}
     });
-    document.addEventListener("copy", handleCopy, true);
-    document.addEventListener("pointerover", event => {
-        const anchor = closestAnchor(event.target);
-        if (anchor && anchor.href) prefetchSpecialURL(anchor.href);
-    }, true);
-    document.addEventListener("focusin", event => {
-        const anchor = closestAnchor(event.target);
-        if (anchor && anchor.href) prefetchSpecialURL(anchor.href);
-    }, true);
+    document.addEventListener("copy", handleCopy);
+    for (const type of ["pointerover", "focusin"]) {
+        document.addEventListener(type, event => {
+            if (!settings.enabled || isEditable(event.target)) return;
+            const anchor = closestAnchor(event.target);
+            if (anchor?.href) prefetchSpecialURL(anchor.href);
+        }, true);
+    }
     document.addEventListener("selectionchange", () => {
-        const value = selectedText();
-        if (value) prefetchSpecialURL(value);
+        if (!settings.enabled) return;
+        try {
+            const value = selectedURL();
+            if (value) prefetchSpecialURL(value);
+        } catch (error) {}
     });
-    loadSettings();
-    chrome.storage.onChanged.addListener(changes => {
-        if (changes.enabled) settings.enabled = Boolean(changes.enabled.newValue);
-        if (changes.pasteClean) settings.pasteClean = Boolean(changes.pasteClean.newValue);
-        if (changes.referralMarketing) settings.referralMarketing = Boolean(changes.referralMarketing.newValue);
+    chrome.storage.onChanged.addListener((changes, area) => {
+        if (area !== "local" || !["enabled", "pasteClean", "referralMarketing"].some(key => changes[key])) return;
+        revision += 1;
+        for (const key of ["enabled", "pasteClean", "referralMarketing"]) {
+            if (changes[key]) settings[key] = changes[key].newValue ?? DEFAULT_SETTINGS[key];
+        }
+        clipboardRequest = null;
+        for (const entry of specialPending.values()) entry.cancel();
+        specialPending.clear();
+        specialCache.clear();
         broadcastNavigationSettings();
     });
+    loadSettings();
 })();

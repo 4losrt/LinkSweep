@@ -4,7 +4,8 @@ importScripts("rules.js", "cleaner.js", "special_urls.js", "special_resolver.js"
 
 const DEFAULT_SETTINGS = {
     enabled: true,
-    pasteClean: true,
+    pasteClean: false,
+    pasteCleanOptInVersion: 0,
     referralMarketing: false,
     copiedCount: 0,
     pasteCleanedCount: 0,
@@ -15,7 +16,37 @@ const DEFAULT_SETTINGS = {
     lastCleanedSource: ""
 };
 
+const PASTE_CLEAN_OPT_IN_VERSION = 1;
+let settingsQueue = Promise.resolve();
+let offscreenQueue = Promise.resolve();
 let offscreenCreating = null;
+
+function serializeSettings(operation) {
+    const pending = settingsQueue.then(operation);
+    settingsQueue = pending.catch(() => {});
+    return pending;
+}
+
+async function readSettings() {
+    const settings = await chrome.storage.local.get(DEFAULT_SETTINGS);
+    if (settings.pasteCleanOptInVersion !== PASTE_CLEAN_OPT_IN_VERSION) {
+        const patch = {pasteClean: false, pasteCleanOptInVersion: PASTE_CLEAN_OPT_IN_VERSION};
+        await chrome.storage.local.set(patch);
+        return {...settings, ...patch};
+    }
+    return settings;
+}
+
+function setSetting(key, value) {
+    return serializeSettings(async () => {
+        if (!["enabled", "pasteClean", "referralMarketing"].includes(key) || typeof value !== "boolean") {
+            throw new Error("Invalid setting");
+        }
+        const settings = await readSettings();
+        await chrome.storage.local.set({[key]: value});
+        return {...settings, [key]: value};
+    });
+}
 
 function cleanWithSettings(url, settings, force = false) {
     const data = {
@@ -27,6 +58,9 @@ function cleanWithSettings(url, settings, force = false) {
 }
 
 async function resolveSpecialURL(url, settings, force = false) {
+    if (!force && !settings.enabled) {
+        return {input: url, output: url, safe: false, changed: false, removed: []};
+    }
     if (globalThis.CleanURLsSpecialResolver && CleanURLsSpecial.isThreadsShareURL(url)) {
         return CleanURLsSpecialResolver.resolveThreadsShare(url, {
             ...settings,
@@ -36,8 +70,8 @@ async function resolveSpecialURL(url, settings, force = false) {
     return cleanWithSettings(url, settings, force);
 }
 
-async function getSettings() {
-    return chrome.storage.local.get(DEFAULT_SETTINGS);
+function getSettings() {
+    return serializeSettings(readSettings);
 }
 
 async function updateBadge() {
@@ -130,13 +164,21 @@ async function sendOffscreenSettings(settings) {
     }
 }
 
-async function syncOffscreen(settings = null) {
-    const current = settings || await getSettings();
-    if (current.enabled && current.pasteClean) {
-        if (await ensureOffscreen()) await sendOffscreenSettings(current);
-    } else {
-        await closeOffscreen();
-    }
+function syncOffscreen() {
+    const pending = offscreenQueue.then(async () => {
+        let current = await getSettings();
+        if (current.enabled && current.pasteClean) {
+            if (!await ensureOffscreen()) return;
+            current = await getSettings();
+            await sendOffscreenSettings(current);
+        }
+        if (!current.enabled || !current.pasteClean) {
+            await sendOffscreenSettings({...current, enabled: false});
+            await closeOffscreen();
+        }
+    });
+    offscreenQueue = pending.catch(() => {});
+    return pending;
 }
 
 async function recordCleaning(result, source, counterKey) {
@@ -155,11 +197,10 @@ async function recordCleaning(result, source, counterKey) {
 }
 
 chrome.runtime.onInstalled.addListener(async () => {
-    const current = await chrome.storage.local.get(DEFAULT_SETTINGS);
-    await chrome.storage.local.set({...DEFAULT_SETTINGS, ...current});
+    await getSettings();
     await createContextMenus();
     await updateBadge();
-    await syncOffscreen({...DEFAULT_SETTINGS, ...current});
+    await syncOffscreen();
 });
 
 chrome.runtime.onStartup.addListener(async () => {
@@ -197,6 +238,12 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
         return true;
     }
 
+    if (message.type === "setSetting") {
+        if (sender.id !== chrome.runtime.id || sender.url !== chrome.runtime.getURL("popup.html")) return;
+        setSetting(message.key, message.value).then(sendResponse).catch(() => sendResponse({error: "Setting not saved"}));
+        return true;
+    }
+
     if (message.type === "cleanURL" || message.type === "resolveSpecialURL") {
         getSettings().then(settings => resolveSpecialURL(
             message.url,
@@ -207,7 +254,13 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
     }
 
     if (message.type === "cleanClipboardURL") {
-        getSettings().then(settings => resolveSpecialURL(message.url, settings, true).then(sendResponse));
+        getSettings().then(async settings => {
+            const manual = message.manual === true;
+            if (!manual && (!settings.enabled || !settings.pasteClean)) {
+                return {input: message.url, output: message.url, safe: false, changed: false, removed: []};
+            }
+            return resolveSpecialURL(message.url, settings, manual);
+        }).then(sendResponse);
         return true;
     }
 
@@ -239,16 +292,14 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
     }
 
     if (message.type === "offscreenReady") {
-        getSettings().then(settings => {
-            if (settings.enabled && settings.pasteClean) sendOffscreenSettings(settings);
-            sendResponse({ok: true});
-        });
+        syncOffscreen().then(() => sendResponse({ok: true})).catch(() => sendResponse({ok: false}));
         return true;
     }
 });
 
-chrome.storage.onChanged.addListener(changes => {
-    if (changes.enabled || changes.pasteClean || changes.referralMarketing) {
+chrome.storage.onChanged.addListener((changes, area) => {
+    if (area !== "local") return;
+    if (changes.enabled || changes.pasteClean || changes.pasteCleanOptInVersion || changes.referralMarketing) {
         syncOffscreen().catch(() => {});
     }
     if (changes.enabled || changes.copiedCount || changes.pasteCleanedCount) {

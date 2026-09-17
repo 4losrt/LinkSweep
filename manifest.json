@@ -1,7 +1,7 @@
 {
   "manifest_version": 3,
   "name": "LinkSweep — Clean URLs",
-  "version": "1.3.5",
+  "version": "1.3.6",
   "description": "Safely clean copied and opened URLs using ClearURLs, AdGuard and uBlock sources, with programmatic clipboard interception and conservative Threads link resolution.",
   "minimum_chrome_version": "111",
   "permissions": [

@@ -4,8 +4,8 @@
     const POLL_MS = 1500;
     const THREADS_RETRY_MS = 8000;
     const DEFAULT_SETTINGS = {
-        enabled: true,
-        pasteClean: true,
+        enabled: false,
+        pasteClean: false,
         referralMarketing: false
     };
 
@@ -15,6 +15,11 @@
     let lastAttemptAt = 0;
     let retryLastValue = false;
     let busy = false;
+    let generation = 0;
+
+    function isCurrent(version) {
+        return version === generation && isMonitoringEnabled();
+    }
 
     function isMonitoringEnabled() {
         return Boolean(settings.enabled && settings.pasteClean);
@@ -42,9 +47,17 @@
         pollClipboard().catch(() => {});
     }
 
-    async function readClipboard() {
+    async function readClipboard(version) {
         try {
-            return await navigator.clipboard.readText();
+            if (!isCurrent(version) || typeof navigator.clipboard.read !== "function") return null;
+            const items = await navigator.clipboard.read();
+            if (!isCurrent(version) || items.length !== 1) return null;
+            const types = Array.from(items[0].types);
+            if (types.length !== 1 || types[0] !== "text/plain") return null;
+            const blob = await items[0].getType("text/plain");
+            if (!isCurrent(version) || blob.type !== "text/plain") return null;
+            const text = await blob.text();
+            return isCurrent(version) ? text : null;
         } catch (error) {
             return null;
         }
@@ -76,15 +89,15 @@
         return CleanURLs.cleanURL(value, cleaningData());
     }
 
-    async function writeIfStillCurrent(before, after) {
-        if (!isMonitoringEnabled() || !after || !after.safe || !after.changed
+    async function writeIfStillCurrent(before, after, version) {
+        if (!isCurrent(version) || !after || !after.safe || !after.changed
             || !CleanURLs.isURL(after.output) || after.output === before) return false;
 
-        // Do not overwrite a newer clipboard value while a Threads request is pending.
-        const current = await readClipboard();
-        if (current === null || CleanURLs.extractSingleURL(current) !== before) return false;
+        const current = await readClipboard(version);
+        if (!isCurrent(version) || current === null || current !== before) return false;
         try {
             await navigator.clipboard.writeText(after.output);
+            if (!isCurrent(version)) return true;
             lastClipboardText = after.output;
             await chrome.runtime.sendMessage({
                 type: "clipboardCleaned",
@@ -102,11 +115,12 @@
     async function pollClipboard() {
         if (busy || !isMonitoringEnabled()) return;
         busy = true;
+        const version = generation;
         try {
-            const text = await readClipboard();
-            if (text === null) return;
+            const text = await readClipboard(version);
+            if (!isCurrent(version) || text === null) return;
             const value = CleanURLs.extractSingleURL(text);
-            if (!value) {
+            if (!value || value !== text) {
                 lastClipboardText = text;
                 return;
             }
@@ -120,8 +134,9 @@
             retryLastValue = false;
 
             const result = await resolveForClipboard(value);
-            const wrote = await writeIfStillCurrent(value, result);
-            if (!wrote && window.CleanURLsSpecial && CleanURLsSpecial.isThreadsShareURL(value)) {
+            if (!isCurrent(version)) return;
+            const wrote = await writeIfStillCurrent(value, result, version);
+            if (isCurrent(version) && !wrote && window.CleanURLsSpecial && CleanURLsSpecial.isThreadsShareURL(value)) {
                 retryLastValue = true;
             }
         } finally {
@@ -130,7 +145,11 @@
     }
 
     function applySettings(next) {
-        settings = {...settings, ...(next || {})};
+        generation += 1;
+        lastClipboardText = null;
+        lastAttemptAt = 0;
+        retryLastValue = false;
+        settings = {...DEFAULT_SETTINGS, ...(next || {})};
         if (isMonitoringEnabled()) startPolling();
         else stopPolling();
     }
